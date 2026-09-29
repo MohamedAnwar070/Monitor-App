@@ -1,0 +1,185 @@
+name: Website URL Monitor
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:        # Manual trigger
+  # schedule:
+  #   - cron: '30 4 * * *'       # Runs every day at 10:00 AM IST (4:30 AM UTC)
+  #   - cron: '0 11 * * *'       # Runs every day at 4:30 PM IST (11:00 AM UTC)
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    env:
+      MONITOR_INPUT_FILE: Monitor Endpoints.xlsx
+      MONITOR_REPORT_FILE: reports/Website_Monitor_Report.xlsx
+      MONITOR_WITH_SCREENSHOT: "1"
+      MONITOR_AUTH_BROWSER_UI_SCREENSHOT: "1"
+      # Upload screenshots to temporary host for public report linking
+      SCREENSHOT_UPLOAD_PROVIDER: tmpfiles
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+    steps:
+      # 1?? Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+
+      # 2?? Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # 3?? Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 3.5?? Install Google Chrome for screenshots
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable xvfb
+          google-chrome --version
+
+          chrome_major="$(google-chrome --product-version | cut -d. -f1)"
+          if command -v chromedriver >/dev/null 2>&1; then
+            driver_path="$(command -v chromedriver)"
+            driver_major="$(chromedriver --version | awk '{print $2}' | cut -d. -f1)"
+            if [ "$chrome_major" != "$driver_major" ]; then
+              echo "Moving incompatible ChromeDriver $driver_major out of PATH; Chrome is $chrome_major"
+              sudo mv "$driver_path" "$RUNNER_TEMP/chromedriver-$driver_major"
+            fi
+          fi
+
+          # Resolve and cache the matching driver once before worker threads start.
+          python - <<'PY'
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+
+          options = Options()
+          options.add_argument("--headless=new")
+          options.add_argument("--no-sandbox")
+          options.add_argument("--disable-dev-shm-usage")
+          driver = webdriver.Chrome(options=options)
+          print(
+              "Chrome/ChromeDriver:",
+              driver.capabilities.get("browserVersion"),
+              driver.capabilities.get("chrome", {}).get("chromedriverVersion"),
+          )
+          driver.quit()
+          PY
+
+      # 4?? Run your website monitor script
+      - name: Run Website Monitor
+        run: |
+          xvfb-run -a -s "-screen 0 1366x768x24" python website_monitor.py
+
+      # 5?? List generated files
+      - name: List generated files
+        run: |
+          echo "Files after script run:"
+          ls -lh
+          echo "Stable report:"
+          ls -lh reports/Website_Monitor_Report.xlsx 2>/dev/null || echo "No report directory yet"
+          echo "Screenshots captured:"
+          ls -lh screenshots/ 2>/dev/null || echo "No screenshots directory"
+
+      # 6?? Commit and push report/screenshots to repo
+      - name: Commit and push report
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          [ -d reports ] && git add -f reports/ || true
+          [ -d screenshots ] && git add -f screenshots/ || true
+          [ -f ssl_summary.txt ] && git add -f ssl_summary.txt || true
+          git commit -m "Add website monitor report [$(date +'%Y-%m-%d %H:%M:%S')]" || echo "No changes to commit"
+          git pull --rebase origin main || echo "No remote changes or rebase failed"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 7?? Send message to Teams webhook (optional)
+      - name: Send message to Teams webhook
+        run: |
+          if [ -z "$TEAMS_WEBHOOK_URL" ] || [ "$TEAMS_WEBHOOK_URL" = "PASTE_TEAMS_WEBHOOK_URL_HERE" ]; then
+            echo "::notice::TEAMS_WEBHOOK_URL secret is not set. Skipping Teams notification."
+            exit 0
+          fi
+
+          repo="${{ github.repository }}"
+          branch="${{ github.ref_name }}"
+          report_file="reports/Website_Monitor_Report.xlsx"
+          echo "Uploading report to tmpfiles.org..."
+          upload_response=$(curl --fail-with-body --show-error --silent \
+            -F "file=@$report_file" \
+            -F "expire=172800" \
+            https://tmpfiles.org/api/v1/upload || true)
+          echo "Upload response: $upload_response"
+
+          download_url=$(echo "$upload_response" | jq -r '.data.url // empty' | sed 's|https://tmpfiles.org/|https://tmpfiles.org/dl/|')
+          if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
+            file_url="$download_url"
+            echo "Using temporary report link: $file_url"
+          else
+            file_url="https://github.com/$repo/raw/$branch/$report_file"
+            echo "::warning::tmpfiles.org upload failed. Falling back to GitHub report link: $file_url"
+          fi
+
+          date_now=$(TZ='Asia/Kolkata' date +"%d-%m-%Y %H:%M:%S")
+          weekday=$(TZ='Asia/Kolkata' date +%A)
+          hour_ist=$(TZ='Asia/Kolkata' date +%H)
+          if [ "$hour_ist" -lt 12 ]; then
+            session_label="Morning"
+          else
+            session_label="Afternoon"
+          fi
+          # Status Emojis
+          emojis=(
+            "??" "?????" "??"
+            "?" "??" "??" "??" "??"
+            "??" "??" "?" "??"
+          )
+          random_emoji=${emojis[$RANDOM % ${#emojis[@]}]}
+          case "$weekday" in
+            Monday) monitor="On-Call Engineer A" ;;
+            Tuesday) monitor="On-Call Engineer B" ;;
+            Wednesday) monitor="On-Call Engineer C" ;;
+            Thursday) monitor="On-Call Engineer D" ;;
+            Friday) monitor="On-Call Engineer E" ;;
+            Saturday) monitor="Weekend Lead" ;;
+            Sunday) monitor="DevOps On-Call ??" ;;
+            *) monitor="Monitoring Team" ;;
+          esac
+          # Read SSL summary if it exists
+          text_body="**?? Date:** $date_now"$'\n\n'"**?? Session:** $session_label"$'\n\n'"**????? Monitor Assigned:** $monitor $random_emoji"$'\n\n'"**?? Live Excel Report:** [Open Report]($file_url)"
+
+          if [ -f ssl_summary.txt ]; then
+            ssl_info=$(cat ssl_summary.txt)
+            text_body="$text_body"$'\n\n---\n**?? SSL Warnings:**\n```\n'"$ssl_info"$'\n```'
+          fi
+
+          # JSON Payload
+          json_payload=$(jq -n \
+            --arg title "Website Monitor Report" \
+            --arg text "$text_body" \
+            '{
+              "@type": "MessageCard",
+              "@context": "http://schema.org/extensions",
+              "summary": "Website Monitor Report",
+              "themeColor": "0076D7",
+              "title": $title,
+              "text": $text
+            }')
+
+          echo "Sending message to Teams..."
+          curl --fail-with-body --show-error --silent --retry 2 --retry-all-errors \
+            -H "Content-Type: application/json" \
+            -d "$json_payload" \
+            "$TEAMS_WEBHOOK_URL"

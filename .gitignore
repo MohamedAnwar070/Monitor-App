@@ -1,0 +1,35 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Environment Variables & Secrets
+.env
+.env.local
+*.secret
+
+# Monitor generated output & screenshots
+screenshots/
+reports/
+ssl_summary.txt
+/Report_*.xlsx
+/url_monitor_*.log
+trigger_log.txt
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
